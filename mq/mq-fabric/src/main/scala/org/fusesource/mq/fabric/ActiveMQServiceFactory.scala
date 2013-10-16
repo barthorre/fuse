@@ -120,7 +120,7 @@ object ActiveMQServiceFactory {
 
 }
 
-class ConfigurationProperties extends FactoryBean[Properties] {
+class OldConfigurationProperties extends FactoryBean[Properties] {
   def getObject = new Properties(ActiveMQServiceFactory.CONFIG_PROPERTIES.get())
   def getObjectType = classOf[Properties]
   def isSingleton = false

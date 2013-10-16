@@ -32,6 +32,7 @@
 
   <properties>
     <fuse.osgi.services.export>javax.jms.ConnectionFactory</fuse.osgi.services.export>
+    <fuse.osgi.service.component>OSGI-INF/*</fuse.osgi.service.component>
   </properties>
 
   <dependencies>
@@ -109,6 +110,22 @@
         <groupId>org.scala-tools</groupId>
         <artifactId>maven-scala-plugin</artifactId>
       </plugin>
+        <plugin>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>maven-scr-plugin</artifactId>
+            <executions>
+                <execution>
+                    <phase>prepare-package</phase>
+                    <goals>
+                        <goal>scr</goal>
+                    </goals>
+                    <configuration>
+                        <specVersion>1.2</specVersion>
+                        <strictMode>false</strictMode>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
     </plugins>
   </build>
 </project>
