@@ -33,7 +33,7 @@ import org.osgi.framework.BundleContext;
 import java.util.HashMap;
 import java.util.Map;
 
-@Component(name = MQServiceFactory.ID, configurationPid = MQServiceFactory.ID,
+@Component(name = MQServiceFactory.ID,
         configurationFactory = true,
         policy = ConfigurationPolicy.REQUIRE)
 public class MQServiceFactory {

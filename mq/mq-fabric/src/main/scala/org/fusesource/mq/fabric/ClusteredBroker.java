@@ -100,7 +100,6 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
                     } else {
                         try {
                             updatePoolState();
-                            started.set(false);
                         } catch (Exception e) {
                             FabricException.launderThrowable(e);
                         }
