@@ -13,6 +13,7 @@ import java.util.Hashtable;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -39,31 +40,46 @@ public class BasicBroker implements ManagedBroker {
     }
 
     public void init() {
-        start();
+        start(false);
     }
 
     @Override
     public void close() {
-        stop();
+        stop(false);
     }
 
-    public void start() {
+    public void start(boolean async) {
         if (started.compareAndSet(false, true)) {
             LOGGER.info("Broker {} is starting.", name);
-            executorService.submit(new BrokerBootstrap());
+            if (async) {
+                executorService.submit(new BrokerBootstrap());
+            } else {
+                startLoop();
+            }
             executorService.submit( new BrokerCheckConfig());
         }
     }
 
-    public void stop() {
+    public void stop(boolean async) {
         if (started.compareAndSet(true, false)) {
             LOGGER.info("Broker {} is stopping.", name);
-            executorService.submit(new BrokerShutdown());
+            if (async) {
+                executorService.submit(new BrokerShutdown());
+            } else {
+                stopBroker();
+            }
+            executorService.shutdown();
+            try {
+                executorService.awaitTermination(5, TimeUnit.SECONDS);
+                brokerInstance = null;
+            } catch (InterruptedException e) {
+                Thread.interrupted();
+            }
         }
     }
 
 
-    synchronized boolean tryStart() {
+    synchronized boolean startBroker() {
         boolean success = false;
         try {
             brokerInstance = MQBrokerFactory.createBroker(config);
@@ -74,30 +90,55 @@ public class BasicBroker implements ManagedBroker {
                 registerConnectionFactory(brokerInstance.getBrokerService());
             }
             success = true;
+            updateLastModified();
         } catch (InterruptedException e) {
             Thread.interrupted();
         } catch (Exception e) {
+            LOGGER.warn("Broker {} failed to start.", e);
             success = false;
+            lastModified.set(-1);
         } finally {
-            updateLastModified();
             return success;
         }
     }
 
-    synchronized void tryStop() {
+    synchronized void stopBroker() {
         try {
-            if (brokerInstance != null) {
-                brokerInstance.close();
-                brokerInstance.getBrokerService().waitUntilStopped();
-                brokerInstance = null;
-            }
-
             if (registration != null) {
                 unregisterConnectionFactory();
             }
 
+            if (brokerInstance != null) {
+                brokerInstance.close();
+            }
         } catch (Throwable t) {
             LOGGER.debug("Exception on close.", t);
+        }
+    }
+
+    void startLoop() {
+        boolean success = false;
+        while (started.get() && !success && !Thread.currentThread().isInterrupted()) {
+            success = startBroker();
+        }
+    }
+
+
+    void checkConfiguration() {
+        while (started.get() && !Thread.currentThread().isInterrupted()) {
+            try {
+                if (brokerConfiguration.isConfigCheckEnabled() &&
+                        lastModified.get() != -1 &&
+                        lastModified.get() != brokerInstance.getResource().lastModified()) {
+                    //We have a shutdown hook that will restart the broker, if it's stopped without setting "started = false"
+                    stopBroker();
+                }
+                Thread.sleep(5 * 1000);
+            } catch (InterruptedException e) {
+                Thread.interrupted();
+            } catch (Exception e) {
+                //Ignored
+            }
         }
     }
 
@@ -133,39 +174,23 @@ public class BasicBroker implements ManagedBroker {
     }
 
     class BrokerBootstrap implements Runnable {
-        boolean success = false;
         @Override
         public void run() {
-            while (started.get() && !success && !Thread.currentThread().isInterrupted()) {
-                success = tryStart();
-            }
+            startLoop();
         }
     }
 
     class BrokerCheckConfig implements Runnable {
         @Override
         public void run() {
-            while (started.get() && !Thread.currentThread().isInterrupted()) {
-                try {
-                    if (brokerConfiguration.isConfigCheckEnabled() && lastModified.get() != brokerInstance.getResource().lastModified()) {
-                        close();
-                        init();
-                        return;
-                    }
-                    Thread.sleep(5 * 1000);
-                } catch (InterruptedException e) {
-                    Thread.interrupted();
-                } catch (Exception e) {
-                    //Ignored
-                }
-            }
+            checkConfiguration();
         }
     }
 
     class BrokerShutdown implements Runnable {
         @Override
         public void run() {
-            tryStop();
+            stopBroker();
         }
     }
 
@@ -173,7 +198,7 @@ public class BasicBroker implements ManagedBroker {
         @Override
         public void run() {
             if (started.get()) {
-                tryStart();
+                startBroker();
             }
         }
     }

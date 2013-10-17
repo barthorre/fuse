@@ -39,6 +39,9 @@ public class BrokerInstance implements Closeable {
         this.resource = resource;
     }
 
+    public ResourceXmlApplicationContext getBrokerContext() {
+        return brokerContext;
+    }
 
     public BrokerService getBrokerService() {
         return brokerService;

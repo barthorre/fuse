@@ -51,12 +51,7 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
     @Override
     public void init() {
         if (brokerConfiguration.isReplicating()) {
-            try {
-                discoveryAgent.start();
-            } catch (Exception e) {
-                LOGGER.warn("Error starting mq fabric discovery agent.", e);
-            }
-            start();
+            start(false);
         } else {
             discoveryAgent.getGroup().add(this);
             updatePoolState();
@@ -64,7 +59,17 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
     }
 
     @Override
-    public void close() {
+    synchronized boolean startBroker() {
+        boolean success = super.startBroker();
+        if (success) {
+            publishServices();
+        }
+        return success;
+    }
+
+
+    @Override
+    synchronized void stopBroker() {
         try {
             if (poolEnabled.get() || (brokerConfiguration.isReplicating() && discoveryAgent != null)) {
                 discoveryAgent.stop();
@@ -72,20 +77,18 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
             if (poolEnabled.get()) {
                 poolManager.returnToPool(this);
             }
-            if (started.compareAndSet(true, false)) {
-                tryStop();
-            }
+
+            super.stopBroker();
         } catch (Exception e) {
             FabricException.launderThrowable(e);
         }
     }
 
-    @Override
-    synchronized boolean tryStart() {
-        boolean success = super.tryStart();
-        publishServices();
-        return success;
+    void checkConfiguration() {
+        //The cluster broker shouldn't be restarted from the configuration update thread.
+        //Instead we enforce update externally by updating the checksum of the broker.xml.
     }
+
 
     @Override
     public void groupEvent(Group<FabricDiscoveryAgent.ActiveMQNode> group, GroupEvent event) {
@@ -93,32 +96,30 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
         switch (event) {
             case CONNECTED:
             case CHANGED:
-                if (discoveryAgent.getGroup().isMaster(brokerConfiguration.getName())) {
+                if (discoveryAgent.getGroup().isMaster(name)) {
                     if (!started.get()) {
-                        LOGGER.info("Broker {} is now the master, starting the broker.", name);
-                        start();
-                    } else {
-                        try {
+                        if (poolManager.takeFromPool(this)) {
+                            LOGGER.info("Broker {} is now the master, starting the broker.", name);
+                            start(true);
+                        } else {
                             updatePoolState();
-                        } catch (Exception e) {
-                            FabricException.launderThrowable(e);
                         }
                     }
                 } else if (started.get()) {
                     LOGGER.info("Broker {} is now a slave, stopping the broker.", name);
                     removeServices();
                     poolManager.returnToPool(ClusteredBroker.this);
-                    stop();
+                    stop(true);
                 } else {
-                    LOGGER.info("Broker {} is now a slave.", name);
+                    LOGGER.info("Broker {} is a slave.", name);
                     removeServices();
                 }
                 break;
             case DISCONNECTED:
                 removeServices();
+                LOGGER.info("Disconnected from the group", name);
         }
     }
-
 
     void updatePoolState()  {
         try {

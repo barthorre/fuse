@@ -35,6 +35,7 @@ import java.util.Map;
 
 @Component(name = MQServiceFactory.ID,
         configurationFactory = true,
+        metatype = true,
         policy = ConfigurationPolicy.REQUIRE)
 public class MQServiceFactory {
 
@@ -48,21 +49,26 @@ public class MQServiceFactory {
     @Reference(referenceInterface = CuratorFramework.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY, policy = ReferencePolicy.DYNAMIC)
     private final ValidatingReference<CuratorFramework> curator = new ValidatingReference<CuratorFramework>();
 
-    @Reference(referenceInterface = FabricService.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY)
+    @Reference(referenceInterface = FabricService.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY, policy = ReferencePolicy.DYNAMIC)
     private final ValidatingReference<FabricService> fabricService = new ValidatingReference<FabricService>();
 
     @Reference(referenceInterface = PoolManager.class)
     private final ValidatingReference<PoolManager> poolManager = new ValidatingReference<PoolManager>();
 
+    private BundleContext bundleContext;
+    private Map<String, Object> configuration;
     private ManagedBroker broker;
 
    @Activate
    synchronized void activate(BundleContext bundleContext, Map<String, Object> configuration) throws Exception {
+       this.bundleContext = bundleContext;
+       this.configuration = configuration;
        create(bundleContext, configuration);
    }
 
     @Modified
     synchronized void modified(BundleContext bundleContext, Map<String, Object> configuration) throws Exception {
+        this.configuration = configuration;
         if (broker != null) {
             broker.close();
         }
@@ -128,12 +134,19 @@ public class MQServiceFactory {
         this.curator.unbind(curatorFramework);
     }
 
-    public void bindFabricService(FabricService fabricService) {
+    public void bindFabricService(FabricService fabricService) throws Exception {
         this.fabricService.bind(fabricService);
+        if (broker != null) {
+            broker.close();
+            create(bundleContext, configuration);
+        }
     }
 
     public void unbindFabricService(FabricService fabricService) {
         this.fabricService.unbind(fabricService);
+        if (broker != null) {
+            broker.close();
+        }
     }
 
     public void bindPoolManager(PoolManager poolManager) {

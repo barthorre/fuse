@@ -9,6 +9,7 @@ import org.apache.felix.scr.annotations.Deactivate;
 import org.apache.felix.scr.annotations.Service;
 import org.fusesource.fabric.api.FabricException;
 
+import java.util.Collection;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -57,34 +58,33 @@ public class PoolManager {
         }
     }
 
-    public synchronized boolean takeFromPool(ClusteredBroker manager) {
-        String pool = manager.getBrokerConfiguration().getPool();
+    public synchronized boolean takeFromPool(ClusteredBroker broker) {
+        String pool = broker.getBrokerConfiguration().getPool();
         if (pool == null) {
             return true;
         } else if (pools.containsKey(pool)){
             return false;
         } else {
-            pools.put(pool, manager);
-            firePoolChangeEvent(pool);
+            pools.put(pool, broker);
             return true;
         }
     }
 
-    public synchronized void returnToPool(ClusteredBroker manager) {
-        String pool = manager.getBrokerConfiguration().getPool();
+    public synchronized void returnToPool(ClusteredBroker broker) {
+        String pool = broker.getBrokerConfiguration().getPool();
         if (pool != null) {
-            pools.removeAll(pool);
-            firePoolChangeEvent(pool);
+            pools.remove(pool, broker);
+            firePoolChangeEvent(pools.get(pool));
         }
     }
 
-    public void firePoolChangeEvent(String pool) {
-         events.add(new PoolChangeEvent(this, pool));
+    public void firePoolChangeEvent(Collection<ClusteredBroker> brokers) {
+         events.add(new PoolChangeEvent(this, brokers));
     }
 
-    private void processPoolChangeEvent(String pool) throws Exception {
-        for (ClusteredBroker configuration : pools.get(pool)) {
-            configuration.updatePoolState();
+    private synchronized void processPoolChangeEvent(Collection<ClusteredBroker> brokers) throws Exception {
+        for (ClusteredBroker broker : brokers) {
+            broker.updatePoolState();
         }
     }
 
@@ -105,16 +105,16 @@ public class PoolManager {
 
     private class PoolChangeEvent  {
         private final PoolManager manager;
-        private final String pool;
+        private final Collection<ClusteredBroker> brokers;
 
-        private PoolChangeEvent(PoolManager manager, String pool) {
+        private PoolChangeEvent(PoolManager manager, Collection<ClusteredBroker> brokers) {
             this.manager = manager;
-            this.pool = pool;
+            this.brokers = brokers;
         }
 
         public void invoke() {
             try {
-                manager.processPoolChangeEvent(pool);
+                manager.processPoolChangeEvent(brokers);
             } catch (Exception e) {
                 FabricException.launderThrowable(e);
             }
