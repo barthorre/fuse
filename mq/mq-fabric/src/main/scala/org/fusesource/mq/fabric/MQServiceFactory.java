@@ -46,10 +46,10 @@ public class MQServiceFactory {
 
     //Use dynamic policy to prevent unneeded re-activations.
     // We are guarded by the FabricService anyways => we only use curator when FabricService is available.
-    @Reference(referenceInterface = CuratorFramework.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY, policy = ReferencePolicy.DYNAMIC)
+    @Reference(referenceInterface = CuratorFramework.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY)
     private final ValidatingReference<CuratorFramework> curator = new ValidatingReference<CuratorFramework>();
 
-    @Reference(referenceInterface = FabricService.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY, policy = ReferencePolicy.DYNAMIC)
+    @Reference(referenceInterface = FabricService.class, cardinality = ReferenceCardinality.OPTIONAL_UNARY)
     private final ValidatingReference<FabricService> fabricService = new ValidatingReference<FabricService>();
 
     @Reference(referenceInterface = PoolManager.class)
@@ -136,17 +136,10 @@ public class MQServiceFactory {
 
     public void bindFabricService(FabricService fabricService) throws Exception {
         this.fabricService.bind(fabricService);
-        if (broker != null) {
-            broker.close();
-            create(bundleContext, configuration);
-        }
     }
 
     public void unbindFabricService(FabricService fabricService) {
         this.fabricService.unbind(fabricService);
-        if (broker != null) {
-            broker.close();
-        }
     }
 
     public void bindPoolManager(PoolManager poolManager) {

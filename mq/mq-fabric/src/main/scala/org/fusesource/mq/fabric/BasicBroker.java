@@ -11,8 +11,12 @@ import javax.jms.ConnectionFactory;
 import java.io.IOException;
 import java.util.Hashtable;
 import java.util.Map;
+import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -25,9 +29,11 @@ public class BasicBroker implements ManagedBroker {
     final Map<String, Object> config;
     final BrokerConfig brokerConfiguration;
     final String name;
+    final AtomicBoolean active = new AtomicBoolean();
     final AtomicBoolean started = new AtomicBoolean();
     final AtomicLong lastModified = new AtomicLong(-1);
-    private final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    private final BlockingQueue<Operation> operations = new LinkedBlockingQueue<Operation>();
 
     volatile BrokerInstance brokerInstance;
     private ServiceRegistration registration;
@@ -40,11 +46,14 @@ public class BasicBroker implements ManagedBroker {
     }
 
     public void init() {
+        active.set(true);
+        executorService.submit(new OperationExecutor());
         start(false);
     }
 
     @Override
     public void close() {
+        active.set(false);
         stop(false);
     }
 
@@ -52,11 +61,11 @@ public class BasicBroker implements ManagedBroker {
         if (started.compareAndSet(false, true)) {
             LOGGER.info("Broker {} is starting.", name);
             if (async) {
-                executorService.submit(new BrokerBootstrap());
+                offerOperation(new BrokerBootstrap());
             } else {
                 startLoop();
             }
-            executorService.submit( new BrokerCheckConfig());
+            offerOperation(new BrokerCheckConfig());
         }
     }
 
@@ -64,7 +73,7 @@ public class BasicBroker implements ManagedBroker {
         if (started.compareAndSet(true, false)) {
             LOGGER.info("Broker {} is stopping.", name);
             if (async) {
-                executorService.submit(new BrokerShutdown());
+                offerOperation(new BrokerShutdown());
             } else {
                 stopBroker();
             }
@@ -173,23 +182,56 @@ public class BasicBroker implements ManagedBroker {
         return brokerConfiguration;
     }
 
-    class BrokerBootstrap implements Runnable {
+
+
+    void offerOperation(Operation o) {
+        try {
+            operations.put(o);
+        } catch (InterruptedException e) {
+            Thread.interrupted();
+        }
+    }
+
+    interface Operation {
+        void execute();
+
+    }
+
+    class OperationExecutor implements Runnable {
+
         @Override
         public void run() {
+            while (active.get() && !Thread.currentThread().isInterrupted()) {
+                try {
+                    Operation o = operations.take();
+                    o.execute();
+                } catch (InterruptedException e) {
+                    Thread.interrupted();
+                } catch (Throwable t) {
+                    LOGGER.debug("Error executing broker lifecycle operation.", t);
+                }
+            }
+        }
+    }
+
+    class BrokerBootstrap implements Operation {
+
+        @Override
+        public void execute() {
             startLoop();
         }
     }
 
-    class BrokerCheckConfig implements Runnable {
+    class BrokerCheckConfig implements Operation {
         @Override
-        public void run() {
+        public void execute() {
             checkConfiguration();
         }
     }
 
-    class BrokerShutdown implements Runnable {
+    class BrokerShutdown implements Operation {
         @Override
-        public void run() {
+        public void execute() {
             stopBroker();
         }
     }
@@ -198,6 +240,7 @@ public class BasicBroker implements ManagedBroker {
         @Override
         public void run() {
             if (started.get()) {
+                stopBroker();
                 startBroker();
             }
         }

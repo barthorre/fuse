@@ -50,6 +50,8 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
 
     @Override
     public void init() {
+        active.set(true);
+        executorService.submit(new OperationExecutor());
         if (brokerConfiguration.isReplicating()) {
             start(false);
         } else {
@@ -71,6 +73,8 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
     @Override
     synchronized void stopBroker() {
         try {
+            super.stopBroker();
+
             if (poolEnabled.get() || (brokerConfiguration.isReplicating() && discoveryAgent != null)) {
                 discoveryAgent.stop();
             }
@@ -78,7 +82,6 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
                 poolManager.returnToPool(this);
             }
 
-            super.stopBroker();
         } catch (Exception e) {
             FabricException.launderThrowable(e);
         }
