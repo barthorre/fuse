@@ -1,40 +1,20 @@
 package org.fusesource.mq.fabric;
 
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
-import com.google.common.collect.Multimaps;
-import org.apache.felix.scr.annotations.Activate;
 import org.apache.felix.scr.annotations.Component;
 import org.apache.felix.scr.annotations.Deactivate;
 import org.apache.felix.scr.annotations.Service;
 import org.fusesource.fabric.api.FabricException;
 
-import java.util.Collection;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
 
 @Component(name = "org.fusesource.mq.pool.manager")
 @Service(PoolManager.class)
 public class PoolManager {
 
-    private final Multimap<String, ClusteredBroker> pools = Multimaps.synchronizedSetMultimap(HashMultimap.<String, ClusteredBroker>create());
-
+    private final ConcurrentHashMap<String, ClusteredBroker> slotOwners = new ConcurrentHashMap<String, ClusteredBroker>();
     private ExecutorService executorService = Executors.newSingleThreadExecutor();
-    private BlockingQueue<PoolChangeEvent> events = new LinkedBlockingQueue();
-
-
-    @Activate
-    void activate() {
-        executorService.submit(new Runnable() {
-            @Override
-            public void run() {
-                mainLoop();
-            }
-        });
-    }
+    List<ClusteredBroker> brokers = Collections.synchronizedList(new ArrayList<ClusteredBroker>());
 
     @Deactivate
     void deactivate() {
@@ -49,12 +29,13 @@ public class PoolManager {
         }
     }
 
-    public synchronized boolean canAcquire(ClusteredBroker manager) {
-        String pool = manager.getBrokerConfiguration().getPool();
+    public synchronized boolean canAcquire(ClusteredBroker broker) {
+        String pool = broker.getBrokerConfiguration().getPool();
         if (pool == null) {
             return true;
         } else {
-            return !pools.containsKey(pool);
+            ClusteredBroker owner = slotOwners.get(pool);
+            return owner==null || owner == broker;
         }
     }
 
@@ -62,62 +43,51 @@ public class PoolManager {
         String pool = broker.getBrokerConfiguration().getPool();
         if (pool == null) {
             return true;
-        } else if (pools.containsKey(pool)){
-            return false;
         } else {
-            pools.put(pool, broker);
-            return true;
+            ClusteredBroker owner = slotOwners.get(pool);
+            if ( owner==broker ){
+                return true; // we already took it.
+            } else if ( owner!=null ){
+                return false; // someone else took it.
+            } else {
+                // lets take it.
+                slotOwners.put(pool, broker);
+                firePoolChangeEvent();
+                return true;
+            }
         }
     }
 
     public synchronized void returnToPool(ClusteredBroker broker) {
         String pool = broker.getBrokerConfiguration().getPool();
         if (pool != null) {
-            pools.remove(pool, broker);
-            firePoolChangeEvent(pools.get(pool));
-        }
-    }
-
-    public void firePoolChangeEvent(Collection<ClusteredBroker> brokers) {
-         events.add(new PoolChangeEvent(this, brokers));
-    }
-
-    private synchronized void processPoolChangeEvent(Collection<ClusteredBroker> brokers) throws Exception {
-        for (ClusteredBroker broker : brokers) {
-            broker.updatePoolState();
-        }
-    }
-
-
-    private void mainLoop() {
-        while (!Thread.currentThread().isInterrupted()) {
-            try {
-                events.take().invoke();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                FabricException.launderThrowable(e);
+            if( slotOwners.remove(pool, broker) ) {
+                firePoolChangeEvent();
             }
         }
     }
 
-
-    private class PoolChangeEvent  {
-        private final PoolManager manager;
-        private final Collection<ClusteredBroker> brokers;
-
-        private PoolChangeEvent(PoolManager manager, Collection<ClusteredBroker> brokers) {
-            this.manager = manager;
-            this.brokers = brokers;
-        }
-
-        public void invoke() {
-            try {
-                manager.processPoolChangeEvent(brokers);
-            } catch (Exception e) {
-                FabricException.launderThrowable(e);
-            }
-        }
+    private void firePoolChangeEvent() {
+        executorService.execute(new Runnable(){
+             @Override
+             public void run() {
+                 try {
+                     for (ClusteredBroker broker : brokers) {
+                         broker.updatePoolState();
+                     }
+                 } catch (Exception e) {
+                     FabricException.launderThrowable(e);
+                 }
+             }
+         });
     }
+
+    public void add(ClusteredBroker broker) {
+        brokers.add(broker);
+    }
+
+    public void remove(ClusteredBroker broker) {
+        brokers.remove(broker);
+    }
+
 }

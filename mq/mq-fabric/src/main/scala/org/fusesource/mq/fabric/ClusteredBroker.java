@@ -51,13 +51,19 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
     @Override
     public void init() {
         active.set(true);
-        executorService.submit(new OperationExecutor());
         if (brokerConfiguration.isReplicating()) {
             start(false);
         } else {
             discoveryAgent.getGroup().add(this);
             updatePoolState();
         }
+        poolManager.add(this);
+    }
+
+    @Override
+    public void close() {
+        poolManager.remove(this);
+        super.close();
     }
 
     @Override
@@ -121,31 +127,32 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
             case DISCONNECTED:
                 removeServices();
                 LOGGER.info("Disconnected from the group", name);
+                if (started.get()) {
+                    removeServices();
+                    poolManager.returnToPool(ClusteredBroker.this);
+                    stop(true);
+                }
         }
     }
 
     void updatePoolState()  {
-        try {
-            String pool = brokerConfiguration.getPool();
-            boolean canAcquire = poolManager.canAcquire(this);
-
-            if (poolEnabled.get() != canAcquire) {
-                poolEnabled.set(canAcquire);
-
-                if (poolEnabled.get()) {
-                    if (pool != null) {
+        String pool = brokerConfiguration.getPool();
+        if( pool!=null ) {
+            try {
+                boolean canAcquire = poolManager.canAcquire(this);
+                if (poolEnabled.get() != canAcquire) {
+                    poolEnabled.set(canAcquire);
+                    if (poolEnabled.get()) {
                         LOGGER.info("Broker {} added to pool {}.", name, pool);
-                    }
-                    discoveryAgent.start();
-                } else {
-                    if (pool != null) {
+                        discoveryAgent.start();
+                    } else {
                         LOGGER.info("Broker {} removed to pool {}.", name, pool);
+                        discoveryAgent.stop();
                     }
-                    discoveryAgent.stop();
                 }
+            } catch (Exception e) {
+                FabricException.launderThrowable(e);
             }
-        } catch (Exception e) {
-            FabricException.launderThrowable(e);
         }
     }
 

@@ -2,6 +2,7 @@ package org.fusesource.mq.fabric;
 
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.broker.BrokerService;
+import org.fusesource.fabric.api.FabricException;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceRegistration;
 import org.slf4j.Logger;
@@ -11,12 +12,8 @@ import javax.jms.ConnectionFactory;
 import java.io.IOException;
 import java.util.Hashtable;
 import java.util.Map;
-import java.util.concurrent.BlockingDeque;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,7 +30,6 @@ public class BasicBroker implements ManagedBroker {
     final AtomicBoolean started = new AtomicBoolean();
     final AtomicLong lastModified = new AtomicLong(-1);
     final ExecutorService executorService = Executors.newSingleThreadExecutor();
-    private final BlockingQueue<Operation> operations = new LinkedBlockingQueue<Operation>();
 
     volatile BrokerInstance brokerInstance;
     private ServiceRegistration registration;
@@ -47,7 +43,6 @@ public class BasicBroker implements ManagedBroker {
 
     public void init() {
         active.set(true);
-        executorService.submit(new OperationExecutor());
         start(false);
     }
 
@@ -55,17 +50,35 @@ public class BasicBroker implements ManagedBroker {
     public void close() {
         active.set(false);
         stop(false);
+        executorService.shutdown();
+        try {
+            executorService.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            FabricException.launderThrowable(e);
+        }
     }
 
     public void start(boolean async) {
         if (started.compareAndSet(false, true)) {
             LOGGER.info("Broker {} is starting.", name);
             if (async) {
-                offerOperation(new BrokerBootstrap());
+                executorService.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        startLoop();
+                    }
+                });
             } else {
                 startLoop();
             }
-            offerOperation(new BrokerCheckConfig());
+            executorService.execute(new Runnable() {
+                @Override
+                public void run() {
+                    checkConfiguration();
+                }
+            });
         }
     }
 
@@ -73,7 +86,12 @@ public class BasicBroker implements ManagedBroker {
         if (started.compareAndSet(true, false)) {
             LOGGER.info("Broker {} is stopping.", name);
             if (async) {
-                offerOperation(new BrokerShutdown());
+                executorService.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        stopBroker();
+                    }
+                });
             } else {
                 stopBroker();
             }
@@ -86,7 +104,6 @@ public class BasicBroker implements ManagedBroker {
             }
         }
     }
-
 
     synchronized boolean startBroker() {
         boolean success = false;
@@ -182,61 +199,7 @@ public class BasicBroker implements ManagedBroker {
         return brokerConfiguration;
     }
 
-
-
-    void offerOperation(Operation o) {
-        try {
-            operations.put(o);
-        } catch (InterruptedException e) {
-            Thread.interrupted();
-        }
-    }
-
-    interface Operation {
-        void execute();
-
-    }
-
-    class OperationExecutor implements Runnable {
-
-        @Override
-        public void run() {
-            while (active.get() && !Thread.currentThread().isInterrupted()) {
-                try {
-                    Operation o = operations.take();
-                    o.execute();
-                } catch (InterruptedException e) {
-                    Thread.interrupted();
-                } catch (Throwable t) {
-                    LOGGER.debug("Error executing broker lifecycle operation.", t);
-                }
-            }
-        }
-    }
-
-    class BrokerBootstrap implements Operation {
-
-        @Override
-        public void execute() {
-            startLoop();
-        }
-    }
-
-    class BrokerCheckConfig implements Operation {
-        @Override
-        public void execute() {
-            checkConfiguration();
-        }
-    }
-
-    class BrokerShutdown implements Operation {
-        @Override
-        public void execute() {
-            stopBroker();
-        }
-    }
-
-    class BrokerShutdownHook implements Runnable {
+    class BrokerShutdownHook implements java.lang.Runnable {
         @Override
         public void run() {
             if (started.get()) {
