@@ -238,6 +238,7 @@ public class FabricDiscoveryAgent implements DiscoveryAgent {
             running.set(false);
             try {
                 getGroup().close();
+                group = null;
             } catch (Throwable ignore) {
                 // Most likely a ServiceUnavailableException: The Blueprint container is being or has been destroyed
             }

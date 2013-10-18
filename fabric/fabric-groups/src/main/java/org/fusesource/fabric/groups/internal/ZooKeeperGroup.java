@@ -25,8 +25,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.api.BackgroundCallback;
-import org.apache.curator.framework.api.CuratorEvent;
 import org.apache.curator.framework.listen.ListenerContainer;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.framework.state.ConnectionStateListener;
@@ -49,13 +47,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.*;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -78,7 +70,6 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
     private final String path;
     private final ExecutorService executorService;
     private final EnsurePath ensurePath;
-    private final BlockingQueue<Operation> operations = new LinkedBlockingQueue<Operation>();
     private final ListenerContainer<GroupListener<T>> listeners = new ListenerContainer<GroupListener<T>>();
     protected final ConcurrentMap<String, ChildData<T>> currentData = Maps.newConcurrentMap();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -91,23 +82,48 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
     private final Watcher childrenWatcher = new Watcher() {
         @Override
         public void process(WatchedEvent event) {
-            offerOperation(new RefreshOperation(ZooKeeperGroup.this, RefreshMode.STANDARD));
+            executeAsync(new Runnable() {
+                @Override
+                public void run()
+                {
+                    try {
+                        refresh(RefreshMode.STANDARD);
+                    } catch (Exception e) {
+                        handleException(e);
+                    }
+                }
+            });
         }
     };
 
     private final Watcher dataWatcher = new Watcher() {
         @Override
-        public void process(WatchedEvent event) {
+        public void process(final WatchedEvent event) {
             try {
                 if (event.getType() == Event.EventType.NodeDeleted) {
-                    remove(event.getPath());
+                    if( remove(event.getPath()) ) {
+                        fireEventAsync(GroupListener.GroupEvent.CHANGED);
+                    }
                 } else if (event.getType() == Event.EventType.NodeDataChanged) {
-                    offerOperation(new GetDataOperation(ZooKeeperGroup.this, event.getPath()));
+                    executeAsync(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                if( getDataAndStat(event.getPath()) ) {
+                                    fireEvent(GroupListener.GroupEvent.CHANGED);
+                                }
+                            } catch (Exception e) {
+                                handleException(e);
+                            }
+
+                        }
+                    });
                 }
             } catch (Exception e) {
                 handleException(e);
             }
         }
+
     };
 
     private final ConnectionStateListener connectionStateListener = new ConnectionStateListener() {
@@ -155,13 +171,6 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
     public void start() {
         if (started.compareAndSet(false, true)) {
             client.getConnectionStateListenable().addListener(connectionStateListener);
-            executorService.execute(new Runnable() {
-                @Override
-                public void run() {
-                    mainLoop();
-                }
-            });
-
             if (isConnected()) {
                 handleStateChange(ConnectionState.CONNECTED);
             }
@@ -186,7 +195,7 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
             try {
                 if (isConnected()) {
                     doUpdate(null);
-                    callListeners(GroupListener.GroupEvent.DISCONNECTED);
+                    fireEvent(GroupListener.GroupEvent.DISCONNECTED);
                 }
             } catch (Exception e) {
                 handleException(e);
@@ -210,7 +219,7 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
     }
 
     @Override
-    public void update(T state) {
+    public void update(final T state) {
         T oldState = this.state;
         this.state = state;
         this.state.setSession(session);
@@ -219,7 +228,16 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
                         ||   state != null && oldState == null
                         || !Arrays.equals(encode(state), encode(oldState));
             if (update) {
-                offerOperation(new UpdateOperation<T>(this, state));
+                executeAsync(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            doUpdate(state);
+                        } catch (Exception e) {
+                            handleException(e);
+                        }
+                    }
+                });
             }
         }
     }
@@ -345,7 +363,16 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
      */
     public void clearAndRefresh() throws Exception {
         currentData.clear();
-        offerOperation(new RefreshOperation(this, RefreshMode.STANDARD));
+        executeAsync(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    refresh(RefreshMode.STANDARD);
+                } catch (Exception e) {
+                    handleException(e);
+                }
+            }
+        });
     }
 
     /**
@@ -363,42 +390,71 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
 
     void refresh(final RefreshMode mode) throws Exception {
         ensurePath.ensure(client.getZookeeperClient());
-        List<String> children = client.getChildren().usingWatcher(childrenWatcher).forPath(path);
-        Collections.sort(children, new Comparator<String>() {
-            @Override
-            public int compare(String left, String right) {
-                return left.compareTo(right);
-            }
-        });
-        processChildren(children, mode);
-    }
-
-    void callListeners(final GroupListener.GroupEvent event) {
-        listeners.forEach
+        ArrayList<String> children = new ArrayList<String>(client.getChildren().usingWatcher(childrenWatcher).forPath(path));
+        Collections.sort(children);
+        List<String> fullPaths = Lists.newArrayList(Lists.transform
                 (
-                        new Function<GroupListener<T>, Void>() {
+                        children,
+                        new Function<String, String>() {
                             @Override
-                            public Void apply(GroupListener<T> listener) {
-                                try {
-                                    listener.groupEvent(ZooKeeperGroup.this, event);
-                                } catch (Exception e) {
-                                    handleException(e);
-                                }
-                                return null;
+                            public String apply(String child) {
+                                return ZKPaths.makePath(path, child);
                             }
                         }
-                );
+                ));
+        Set<String> removedNodes = Sets.newHashSet(currentData.keySet());
+        removedNodes.removeAll(fullPaths);
+
+        boolean changed = false;
+        for (String fullPath : removedNodes) {
+            if( remove(fullPath) ) {
+                changed = true;
+            }
+        }
+
+        for (String name : children) {
+            String fullPath = ZKPaths.makePath(path, name);
+            if ((mode == RefreshMode.FORCE_GET_DATA_AND_STAT) || !currentData.containsKey(fullPath)) {
+                changed |= getDataAndStat(fullPath);
+            }
+        }
+
+        if( changed ) {
+            fireEvent(GroupListener.GroupEvent.CHANGED);
+        }
     }
 
-    void getDataAndStat(final String fullPath) throws Exception {
-        BackgroundCallback getDataCallback = new BackgroundCallback() {
+    void fireEvent(final GroupListener.GroupEvent event) {
+        listeners.forEach (new Function<GroupListener<T>, Void>() {
             @Override
-            public void processResult(CuratorFramework client, CuratorEvent event) throws Exception {
-                applyNewData(fullPath, event.getResultCode(), event.getStat(), event.getData());
+            public Void apply(GroupListener<T> listener) {
+                try {
+                    listener.groupEvent(ZooKeeperGroup.this, event);
+                } catch (Exception e) {
+                    handleException(e);
+                }
+                return null;
             }
-        };
+        });
+    }
 
-        client.getData().usingWatcher(dataWatcher).inBackground(getDataCallback).forPath(fullPath);
+    boolean getDataAndStat(final String fullPath) throws Exception {
+        Stat stat = new Stat();
+        try {
+            byte[] data = client.getData().storingStatIn(stat).usingWatcher(dataWatcher).forPath(fullPath);
+
+            // otherwise - node must have dropped or something - we should be getting another event
+            ChildData newData = new ChildData(fullPath, stat, data, decode(data));
+            ChildData previousData = currentData.put(fullPath, newData);
+            if (previousData == null || previousData.getStat().getVersion() != stat.getVersion()) {
+                return true;
+            }
+        } catch (KeeperException.NoNodeException e) {
+            if( currentData.remove(fullPath) !=null ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -412,11 +468,17 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
     }
 
     @VisibleForTesting
-    protected void remove(String fullPath) {
-        ChildData data = currentData.remove(fullPath);
-        if (data != null) {
-            offerOperation(new EventOperation(this, GroupListener.GroupEvent.CHANGED));
-        }
+    protected boolean remove(String fullPath) {
+        return currentData.remove(fullPath) != null;
+    }
+
+    public void fireEventAsync(final GroupListener.GroupEvent event) {
+        executeAsync(new Runnable() {
+            @Override
+            public void run() {
+                fireEvent(event);
+            }
+        });
     }
 
     private void internalRebuildNode(String fullPath) throws Exception {
@@ -435,67 +497,25 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
             case SUSPENDED:
             case LOST: {
                 clear();
-                offerOperation(new EventOperation(this, GroupListener.GroupEvent.DISCONNECTED));
+                fireEventAsync(GroupListener.GroupEvent.DISCONNECTED);
                 break;
             }
 
             case CONNECTED:
             case RECONNECTED: {
-                offerOperation(new UpdateOperation<T>(this, state));
-                offerOperation(new RefreshOperation(this, RefreshMode.FORCE_GET_DATA_AND_STAT));
-                offerOperation(new EventOperation(this, GroupListener.GroupEvent.CONNECTED));
-                break;
-            }
-        }
-    }
-
-    private void processChildren(List<String> children, RefreshMode mode) throws Exception {
-        List<String> fullPaths = Lists.newArrayList(Lists.transform
-                (
-                        children,
-                        new Function<String, String>() {
-                            @Override
-                            public String apply(String child) {
-                                return ZKPaths.makePath(path, child);
-                            }
+                executeAsync(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            doUpdate(state);
+                            fireEvent(GroupListener.GroupEvent.CONNECTED);
+                            refresh(RefreshMode.FORCE_GET_DATA_AND_STAT);
+                        } catch (Exception e) {
+                            handleException(e);
                         }
-                ));
-        Set<String> removedNodes = Sets.newHashSet(currentData.keySet());
-        removedNodes.removeAll(fullPaths);
-
-        for (String fullPath : removedNodes) {
-            remove(fullPath);
-        }
-
-        for (String name : children) {
-            String fullPath = ZKPaths.makePath(path, name);
-
-            if ((mode == RefreshMode.FORCE_GET_DATA_AND_STAT) || !currentData.containsKey(fullPath)) {
-                getDataAndStat(fullPath);
-            }
-        }
-    }
-
-    private void applyNewData(String fullPath, int resultCode, Stat stat, byte[] bytes) {
-        if (resultCode == KeeperException.Code.OK.intValue()) {
-            // otherwise - node must have dropped or something - we should be getting another event
-            ChildData data = new ChildData(fullPath, stat, bytes, decode(bytes));
-            ChildData previousData = currentData.put(fullPath, data);
-            if (previousData == null || previousData.getStat().getVersion() != stat.getVersion()) {
-                offerOperation(new EventOperation(this, GroupListener.GroupEvent.CHANGED));
-            }
-        }
-    }
-
-    private void mainLoop() {
-        while (!Thread.currentThread().isInterrupted()) {
-            try {
-                operations.take().invoke();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+                    }
+                });
                 break;
-            } catch (Exception e) {
-                handleException(e);
             }
         }
     }
@@ -518,11 +538,6 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
         }
     }
 
-    private void offerOperation(Operation operation) {
-        operations.remove(operation);   // avoids herding for refresh operations
-        operations.offer(operation);
-    }
-
     public static <T> Map<String, T> members(CuratorFramework curator, String path, Class<T> clazz) throws Exception {
         Map<String, T> map = new TreeMap<String, T>();
         List<String> nodes = curator.getChildren().forPath(path);
@@ -533,6 +548,16 @@ public class ZooKeeperGroup<T extends NodeState> implements Group<T> {
             map.put(node, val);
         }
         return map;
+    }
+
+    private void executeAsync(Runnable op) {
+        try {
+            executorService.execute(op);
+        } catch (RejectedExecutionException e) {
+            if( started.get() ) {
+                LOG.warn("Failed to execute background task.", e);
+            }
+        }
     }
 
     public String getId() {

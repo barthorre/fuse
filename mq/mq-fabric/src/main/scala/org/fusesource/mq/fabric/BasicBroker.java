@@ -30,6 +30,7 @@ public class BasicBroker implements ManagedBroker {
     final AtomicBoolean started = new AtomicBoolean();
     final AtomicLong lastModified = new AtomicLong(-1);
     final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    final BrokerRestartTask brokerRestartTask = new BrokerRestartTask();
 
     volatile BrokerInstance brokerInstance;
     private ServiceRegistration registration;
@@ -95,7 +96,6 @@ public class BasicBroker implements ManagedBroker {
             } else {
                 stopBroker();
             }
-            executorService.shutdown();
             try {
                 executorService.awaitTermination(5, TimeUnit.SECONDS);
                 brokerInstance = null;
@@ -109,7 +109,7 @@ public class BasicBroker implements ManagedBroker {
         boolean success = false;
         try {
             brokerInstance = MQBrokerFactory.createBroker(config);
-            brokerInstance.getBrokerService().addShutdownHook(new BrokerShutdownHook());
+            brokerInstance.getBrokerService().addShutdownHook(brokerRestartTask);
             brokerInstance.getBrokerService().start();
             LOGGER.info("Broker {} has started.", name);
             if (brokerConfiguration.isServiceRegistrationEnabled()) {
@@ -135,6 +135,7 @@ public class BasicBroker implements ManagedBroker {
             }
 
             if (brokerInstance != null) {
+                brokerInstance.getBrokerService().removeShutdownHook(brokerRestartTask);
                 brokerInstance.close();
             }
         } catch (Throwable t) {
@@ -199,13 +200,18 @@ public class BasicBroker implements ManagedBroker {
         return brokerConfiguration;
     }
 
-    class BrokerShutdownHook implements java.lang.Runnable {
+    class BrokerRestartTask implements java.lang.Runnable {
         @Override
         public void run() {
-            if (started.get()) {
-                stopBroker();
-                startBroker();
-            }
+            new Thread("Broker Restart Thread"){
+                @Override
+                public void run() {
+                    if (started.get()) {
+                        stopBroker();
+                        startBroker();
+                    }
+                }
+            }.start();
         }
     }
 }

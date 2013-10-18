@@ -54,7 +54,6 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
         if (brokerConfiguration.isReplicating()) {
             start(false);
         } else {
-            discoveryAgent.getGroup().add(this);
             updatePoolState();
         }
         poolManager.add(this);
@@ -79,15 +78,17 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
     @Override
     synchronized void stopBroker() {
         try {
+            removeServices();
+            poolManager.returnToPool(ClusteredBroker.this);
+
             super.stopBroker();
 
-            if (poolEnabled.get() || (brokerConfiguration.isReplicating() && discoveryAgent != null)) {
+            if (poolEnabled.compareAndSet(true, false)) {
                 discoveryAgent.stop();
             }
-            if (poolEnabled.get()) {
-                poolManager.returnToPool(this);
-            }
+            poolManager.returnToPool(this);
 
+            updatePoolState();
         } catch (Exception e) {
             FabricException.launderThrowable(e);
         }
@@ -104,6 +105,7 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
         String name = brokerConfiguration.getName();
         switch (event) {
             case CONNECTED:
+                LOGGER.info("Broker {} connected to the group", name);
             case CHANGED:
                 if (discoveryAgent.getGroup().isMaster(name)) {
                     if (!started.get()) {
@@ -116,8 +118,6 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
                     }
                 } else if (started.get()) {
                     LOGGER.info("Broker {} is now a slave, stopping the broker.", name);
-                    removeServices();
-                    poolManager.returnToPool(ClusteredBroker.this);
                     stop(true);
                 } else {
                     LOGGER.info("Broker {} is a slave.", name);
@@ -125,11 +125,8 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
                 }
                 break;
             case DISCONNECTED:
-                removeServices();
-                LOGGER.info("Disconnected from the group", name);
+                LOGGER.info("Broker {} disconnected from the group", name);
                 if (started.get()) {
-                    removeServices();
-                    poolManager.returnToPool(ClusteredBroker.this);
                     stop(true);
                 }
         }
@@ -144,6 +141,7 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
                     poolEnabled.set(canAcquire);
                     if (poolEnabled.get()) {
                         LOGGER.info("Broker {} added to pool {}.", name, pool);
+                        discoveryAgent.getGroup().add(this);
                         discoveryAgent.start();
                     } else {
                         LOGGER.info("Broker {} removed to pool {}.", name, pool);
