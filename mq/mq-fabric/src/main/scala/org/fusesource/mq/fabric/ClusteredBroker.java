@@ -136,7 +136,7 @@ public class ClusteredBroker extends BasicBroker implements GroupListener<Fabric
         String pool = brokerConfiguration.getPool();
         if( pool!=null ) {
             try {
-                boolean canAcquire = poolManager.canAcquire(this);
+                boolean canAcquire = active.get() && poolManager.canAcquire(this);
                 if (poolEnabled.get() != canAcquire) {
                     poolEnabled.set(canAcquire);
                     if (poolEnabled.get()) {
