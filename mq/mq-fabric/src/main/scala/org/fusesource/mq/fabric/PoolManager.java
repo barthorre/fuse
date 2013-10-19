@@ -68,18 +68,25 @@ public class PoolManager {
     }
 
     private void firePoolChangeEvent() {
-        executorService.execute(new Runnable(){
-             @Override
-             public void run() {
-                 try {
-                     for (ClusteredBroker broker : brokers) {
-                         broker.updatePoolState();
+        try {
+            executorService.execute(new Runnable(){
+                 @Override
+                 public void run() {
+                     try {
+                         for (ClusteredBroker broker : brokers) {
+                             broker.updatePoolState();
+                         }
+                     } catch (Exception e) {
+                         FabricException.launderThrowable(e);
                      }
-                 } catch (Exception e) {
-                     FabricException.launderThrowable(e);
                  }
-             }
-         });
+             });
+        } catch (RejectedExecutionException e) {
+            // Ignore these after the component shuts down.
+            if( !executorService.isShutdown() ) {
+                throw e;
+            }
+        }
     }
 
     public void add(ClusteredBroker broker) {
