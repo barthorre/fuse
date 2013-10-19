@@ -115,7 +115,7 @@ public class MQServiceFactory {
             config.put("container.id", container.getId());
         }
         if (!config.containsKey("container.ip")) {
-            config.put("container.ip", container.getId());
+            config.put("container.ip", container.getIp());
         }
         if (!config.containsKey("zookeeper.url")) {
             config.put("zookeeper.url", fabricService.getZookeeperUrl());
